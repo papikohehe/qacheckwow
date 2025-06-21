@@ -3,29 +3,25 @@ import pandas as pd
 from docx import Document
 import io
 from difflib import SequenceMatcher
+import re
 
 def get_highlighted_diff(text1, text2):
     """
     Compares two strings and returns an HTML string with the parts of text1 
     that are not in text2 highlighted in yellow.
     """
-    matcher = SequenceMatcher(None, text2, text1)
+    matcher = SequenceMatcher(None, text2, text1, autojunk=False)
     
-    # Get the operations needed to transform text2 into text1
     opcodes = matcher.get_opcodes()
     
     highlighted_text = []
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == 'equal':
-            # This part of text1 is present in text2
             highlighted_text.append(text1[j1:j2])
         elif tag == 'insert':
-            # This part of text1 is NOT present in text2, so highlight it
             highlighted_text.append(f'<span style="background-color: #fdd835;">{text1[j1:j2]}</span>')
         elif tag == 'replace':
-            # Part of text1 replaces something in text2, highlight the replacement
             highlighted_text.append(f'<span style="background-color: #fdd835;">{text1[j1:j2]}</span>')
-        # 'delete' tag is ignored as we only care about text present in text1
         
     return "".join(highlighted_text)
 
@@ -39,15 +35,12 @@ def parse_docx(file_content):
     doc = Document(io.BytesIO(file_content))
     
     for i, para in enumerate(doc.paragraphs):
-        # Skip empty paragraphs
         if not para.text.strip():
             continue
             
         line_number = i + 1
-        # A tab in python-docx is represented by a '\t' character.
         tab_count = para.text.count('\t')
         
-        # Strip leading/trailing whitespace and tabs for clean text content
         clean_text = para.text.strip()
         
         key = f"L{line_number}:T{tab_count}"
@@ -55,50 +48,92 @@ def parse_docx(file_content):
         
     return doc_data
 
+def parse_location_string(location_str):
+    """
+    Parses a location string, which can be a single location or a range.
+    Returns a list of location keys.
+    e.g., "L2:T2" -> ["L2:T2"]
+    e.g., "L2:T2 - L4:T2" -> ["L2:T2", "L3:T2", "L4:T2"]
+    """
+    location_str = location_str.strip()
+    if " - " in location_str:
+        try:
+            start_loc, end_loc = location_str.split(" - ")
+            start_match = re.match(r"L(\d+):T(\d+)", start_loc.strip())
+            end_match = re.match(r"L(\d+):T(\d+)", end_loc.strip())
+            
+            if not start_match or not end_match:
+                return [location_str] 
+                
+            start_l, start_t = int(start_match.group(1)), int(start_match.group(2))
+            end_l, end_t = int(end_match.group(1)), int(end_match.group(2))
+
+            if start_t != end_t:
+                 return [location_str]
+
+            return [f"L{i}:T{start_t}" for i in range(start_l, end_l + 1)]
+        except Exception:
+            return [location_str]
+    else:
+        return [location_str]
+
 
 def run_checker(df, doc_data):
     """
     Checks each row of the DataFrame against the parsed document data.
+    Handles single locations and ranges (e.g., "L2:T2 - L4:T2").
     Returns a list of dictionaries with the results.
     """
     results = []
     
+    # Expect sentence in 4th col (D) and location in 6th col (F)
+    if len(df.columns) < 6:
+        st.error("Error: The Excel file must have at least 6 columns.")
+        return None
+        
+    sentence_col_name = df.columns[3]
+    location_col_name = df.columns[5]
+    
     for index, row in df.iterrows():
-        # Assuming sentence is in column D and location is in column F
-        # Adjust 'D' and 'F' if your columns have names
         try:
-            sentence_to_check = str(row['D']).strip()
-            location = str(row['F']).strip()
-        except KeyError as e:
-            st.error(f"Error: Missing expected column in Excel file. Please ensure you have columns 'D' and 'F'. Details: {e}")
+            sentence_to_check = str(row[sentence_col_name]).strip()
+            location_str = str(row[location_col_name]).strip()
+            
+            if not sentence_to_check or not location_str or sentence_to_check.lower() == 'nan' or location_str.lower() == 'nan':
+                continue
+
+        except (KeyError, IndexError) as e:
+            st.error(f"Error accessing columns in Excel file. Details: {e}")
             return None
 
         result_item = {
             "excel_row": index + 2, # Excel rows are 1-based, plus header
-            "location": location,
+            "location": location_str,
             "sentence": sentence_to_check,
             "status": "",
             "details": ""
         }
+        
+        location_keys = parse_location_string(location_str)
+        
+        doc_texts = [doc_data.get(key) for key in location_keys]
 
-        # Check if the location from Excel exists in the parsed DOCX data
-        if location in doc_data:
-            doc_text = doc_data[location]
+        if None in doc_texts:
+            missing_keys = [key for i, key in enumerate(location_keys) if doc_texts[i] is None]
+            result_item["status"] = "❌ Error"
+            result_item["details"] = f"The specified location(s) `{', '.join(missing_keys)}` were not found in the DOCX file."
+        else:
+            full_doc_text = " ".join(doc_texts)
             
-            # Check if the sentence from Excel is a substring of the text in the DOCX
-            if sentence_to_check in doc_text:
+            if sentence_to_check in full_doc_text:
                 result_item["status"] = "✅ Correct"
-                result_item["details"] = f"The sentence was found exactly as stated in the document at `{location}`."
+                result_item["details"] = f"The sentence was found exactly as stated in the document within `{location_str}`."
             else:
                 result_item["status"] = "❌ Incorrect"
-                # Generate highlighted difference
-                highlighted_diff = get_highlighted_diff(sentence_to_check, doc_text)
+                highlighted_diff = get_highlighted_diff(sentence_to_check, full_doc_text)
                 result_item["details"] = f"The sentence was **not** found as stated. Differences are highlighted below:"
                 result_item["highlighted"] = highlighted_diff
-                result_item["doc_text"] = doc_text
-        else:
-            result_item["status"] = "❌ Error"
-            result_item["details"] = f"The specified location `{location}` was not found in the DOCX file."
+                result_item["doc_text"] = full_doc_text
 
         results.append(result_item)
         
@@ -113,7 +148,7 @@ st.title("📄 Extractive Sentence Checker Tool")
 st.info("""
     **How to use this tool:**
     1.  Upload the meeting minutes as a `.docx` file (บันทึกการประชุม).
-    2.  Upload the corresponding Excel file with sentences to check.
+    2.  Upload the corresponding Excel file with sentences to check. The Excel file should have a header row.
     3.  The tool will verify if each sentence from the Excel file exists at the specified location in the Word document.
 """)
 
@@ -121,11 +156,11 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Upload DOCX File (บันทึกการประชุม)")
-    docx_file = st.file_uploader("Upload your .docx file", type=["docx"])
+    docx_file = st.file_uploader("Upload your .docx file", type=["docx"], key="docx")
 
 with col2:
     st.subheader("2. Upload Excel File")
-    xlsx_file = st.file_uploader("Upload your .xlsx file", type=["xlsx"])
+    xlsx_file = st.file_uploader("Upload your .xlsx file", type=["xlsx"], key="xlsx")
 
 
 if docx_file is not None and xlsx_file is not None:
@@ -134,18 +169,15 @@ if docx_file is not None and xlsx_file is not None:
     st.header("Results")
 
     try:
-        # Read file contents
         docx_content = docx_file.getvalue()
-        
-        # Parse the documents
         doc_data = parse_docx(docx_content)
-        df = pd.read_excel(xlsx_file, header=None, names=['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+        
+        # Use header=0 to treat the first row as the header
+        df = pd.read_excel(xlsx_file, header=0) 
 
-        # Run the checker
         results = run_checker(df, doc_data)
 
         if results:
-            # Display results
             for res in results:
                 with st.expander(f"**Row {res['excel_row']} | Location: {res['location']} | Status: {res['status']}**"):
                     st.markdown(f"**Sentence to Check:**")
@@ -160,4 +192,4 @@ if docx_file is not None and xlsx_file is not None:
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
-        st.error("Please ensure the uploaded files are in the correct format and not corrupted.")
+        st.error("Please ensure the uploaded files are valid and not corrupted. The Excel file must have a header row.")
