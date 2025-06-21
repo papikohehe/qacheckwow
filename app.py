@@ -105,6 +105,7 @@ def run_checker(df, doc_data, line_to_key_map):
     """
     Checks each row of the DataFrame against the parsed document data.
     Handles single locations and ranges.
+    For ranges, checks if the sentence exists in any single line within the range.
     Returns a list of dictionaries with the results.
     """
     results = []
@@ -142,16 +143,23 @@ def run_checker(df, doc_data, line_to_key_map):
             result_item["status"] = "❌ Error"
             result_item["details"] = f"The specified location `{location_str}` could not be found or was in an invalid format. Please check line numbers and format (e.g., L21:T0, L24:C)."
         else:
-            doc_texts = [doc_data.get(key) for key in location_keys]
-            full_doc_text = " ".join(filter(None, doc_texts))
+            doc_texts = [doc_data.get(key) for key in location_keys if doc_data.get(key) is not None]
             
-            if sentence_to_check in full_doc_text:
+            is_found = False
+            for text in doc_texts:
+                if sentence_to_check in text:
+                    is_found = True
+                    break # Found a match, no need to check other lines in the range
+
+            if is_found:
                 result_item["status"] = "✅ Correct"
-                result_item["details"] = f"The sentence was found exactly as stated in the document within `{location_str}`."
+                result_item["details"] = f"The sentence was found exactly as stated in the document within the range `{location_str}`."
             else:
+                # If not found, combine text for highlighting context
+                full_doc_text = " ".join(doc_texts)
                 result_item["status"] = "❌ Incorrect"
                 highlighted_diff = get_highlighted_diff(sentence_to_check, full_doc_text)
-                result_item["details"] = f"The sentence was **not** found as stated. Differences are highlighted below:"
+                result_item["details"] = f"The sentence was **not** found in any single line within the specified range. Differences compared to the combined text from the range are highlighted below:"
                 result_item["highlighted"] = highlighted_diff
                 result_item["doc_text"] = full_doc_text
 
