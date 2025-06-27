@@ -28,7 +28,7 @@ def get_highlighted_diff(text1, text2):
 
 def parse_docx(file_content):
     """
-    Parses the uploaded .docx file content, numbering only non-empty paragraphs.
+    Parses the uploaded .docx file content, numbering ALL paragraphs sequentially.
     Returns two dictionaries:
     - doc_data: maps 'Ln:Tn' to the paragraph text.
     - line_to_key_map: maps a line number (int) to its full key 'Ln:Tn'.
@@ -37,22 +37,23 @@ def parse_docx(file_content):
     line_to_key_map = {}
     doc = Document(io.BytesIO(file_content))
     
-    para_index = 0
+    # Initialize a counter that increments for *every* paragraph, regardless of content
+    true_line_number_counter = 0 
+    
     for para in doc.paragraphs:
-        # Skip empty paragraphs
-        if not para.text.strip():
-            continue
-            
-        line_number = para_index + 1
+        true_line_number_counter += 1 # Increment for every paragraph encountered
+        
         tab_count = para.text.count('\t')
+        clean_text = para.text.strip() # Still strip whitespace for comparison later
         
-        clean_text = para.text.strip()
+        # The key uses the 'true_line_number_counter' for 'L'
+        key = f"L{true_line_number_counter}:T{tab_count}"
         
-        key = f"L{line_number}:T{tab_count}"
+        # Store the cleaned text. If it was an empty paragraph, clean_text will be empty.
         doc_data[key] = clean_text
-        line_to_key_map[line_number] = key
         
-        para_index += 1
+        # Map this true line number to its key
+        line_to_key_map[true_line_number_counter] = key
         
     return doc_data, line_to_key_map
 
@@ -82,7 +83,7 @@ def parse_location_string(location_str, line_to_key_map):
             keys = []
             for line_num in range(start_l, end_l + 1):
                 key = line_to_key_map.get(line_num)
-                if key:
+                if key: # Only add if a corresponding key exists (i.e., that line number was parsed)
                     keys.append(key)
             return keys
         except Exception:
@@ -130,7 +131,7 @@ def run_checker(df, doc_data, line_to_key_map):
             return None
 
         result_item = {
-            "excel_row": index + 2,
+            "excel_row": index + 2, # This shows the Excel row number (1-based, accounting for header)
             "location": location_str,
             "sentence": sentence_to_check,
             "status": "",
@@ -141,7 +142,7 @@ def run_checker(df, doc_data, line_to_key_map):
         
         if not location_keys:
             result_item["status"] = "❌ Error"
-            result_item["details"] = f"The specified location {location_str} could not be found or was in an invalid format. Please check line numbers and format (e.g., L21:T0, L24:C)."
+            result_item["details"] = f"The specified location {location_str} could not be found or was in an invalid format. Please check line numbers and format (e.g., L21:T0, L24:C). Ensure the line number exists in the document."
         else:
             doc_texts = [doc_data.get(key) for key in location_keys if doc_data.get(key) is not None]
             
@@ -158,10 +159,14 @@ def run_checker(df, doc_data, line_to_key_map):
                 # If not found, combine text for highlighting context
                 full_doc_text = " ".join(doc_texts)
                 result_item["status"] = "❌ Incorrect"
-                highlighted_diff = get_highlighted_diff(sentence_to_check, full_doc_text)
-                result_item["details"] = f"The sentence was **not** found in any single line within the specified range. Differences compared to the combined text from the range are highlighted below:"
-                result_item["highlighted"] = highlighted_diff
-                result_item["doc_text"] = full_doc_text
+                # If the combined text is empty (e.g., trying to check an empty line)
+                if not full_doc_text.strip():
+                    result_item["details"] = f"The sentence was **not** found in the specified location {location_str}. The document content at this location appears to be empty."
+                else:
+                    highlighted_diff = get_highlighted_diff(sentence_to_check, full_doc_text)
+                    result_item["details"] = f"The sentence was **not** found in any single line within the specified range. Differences compared to the combined text from the range are highlighted below:"
+                    result_item["highlighted"] = highlighted_diff
+                    result_item["doc_text"] = full_doc_text
 
         results.append(result_item)
         
@@ -175,9 +180,9 @@ st.title("📄 Extractive Sentence Checker Tool")
 
 st.info("""
     **How to use this tool:**
-    1.  Upload the meeting minutes as a .docx file (บันทึกการประชุม).
-    2.  Upload the corresponding Excel file with sentences to check. The Excel file should have a header row.
-    3.  The tool will verify if each sentence from the Excel file exists at the specified location in the Word document.
+    1. Upload the meeting minutes as a .docx file (บันทึกการประชุม).
+    2. Upload the corresponding Excel file with sentences to check. The Excel file should have a header row.
+    3. The tool will verify if each sentence from the Excel file exists at the specified location in the Word document.
 """)
 
 col1, col2 = st.columns(2)
@@ -216,9 +221,10 @@ if docx_file is not None and xlsx_file is not None:
                         st.markdown(res["highlighted"], unsafe_allow_html=True)
                         st.markdown("**Original Text from Document:**")
                         st.markdown(f"> {res['doc_text']}")
+                    elif res.get("doc_text") == "": # Specific case for empty line in document
+                         st.markdown("**Original Text from Document:** (Empty at this location)")
+
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
         st.error("Please ensure the uploaded files are valid and not corrupted. The Excel file must have a header row.")
-
-
