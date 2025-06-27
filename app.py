@@ -65,7 +65,7 @@ def parse_location_string(location_str, line_to_key_map):
     location_str = location_str.strip()
     
     # Regex to capture the line number from formats like L21:T0, L24:C, etc.
-    range_regex = r"L(\d+):[TC]\d*"
+    range_regex = r"L(\d+):[TC]\d*" # Adjusted to be more general for T or C, and optional tab count
     
     # Handle ranges
     if " - " in location_str:
@@ -105,8 +105,8 @@ def parse_location_string(location_str, line_to_key_map):
 def run_checker(df, doc_data, line_to_key_map):
     """
     Checks each row of the DataFrame against the parsed document data.
-    Handles single locations and ranges.
-    For ranges, checks if the sentence exists in any single line within the range.
+    Handles single locations by expanding the search to the line before and after.
+    For ranges, checks within the specified range.
     Returns a list of dictionaries with the results.
     """
     results = []
@@ -138,14 +138,58 @@ def run_checker(df, doc_data, line_to_key_map):
             "details": ""
         }
         
-        location_keys = parse_location_string(location_str, line_to_key_map)
+        # Get the initially parsed location keys
+        initial_location_keys = parse_location_string(location_str, line_to_key_map)
         
-        if not location_keys:
+        expanded_location_keys = []
+        if initial_location_keys:
+            # If the original location was a single line, expand to include +/- 1 line
+            if len(initial_location_keys) == 1:
+                original_key = initial_location_keys[0]
+                # Extract the line number from the original_key (e.g., 'L65:T3' -> 65)
+                match = re.match(r"L(\d+):", original_key)
+                if match:
+                    original_line_num = int(match.group(1))
+                    
+                    # Add previous line if it exists (line numbers >= 1)
+                    prev_line_num = original_line_num - 1
+                    if prev_line_num >= 1: 
+                        prev_key = line_to_key_map.get(prev_line_num)
+                        if prev_key:
+                            expanded_location_keys.append(prev_key)
+                    
+                    # Add the original line key
+                    expanded_location_keys.append(original_key)
+
+                    # Add next line if it exists in the document
+                    next_line_num = original_line_num + 1
+                    next_key = line_to_key_map.get(next_line_num)
+                    if next_key:
+                        expanded_location_keys.append(next_key)
+                else:
+                    # Fallback if original_key couldn't be parsed (shouldn't happen with valid input)
+                    expanded_location_keys = initial_location_keys
+            else:
+                # If it was already a range, just use the provided keys as is
+                expanded_location_keys = initial_location_keys
+        
+        # --- End of NEW LOGIC ---
+
+        if not expanded_location_keys:
             result_item["status"] = "❌ Error"
             result_item["details"] = f"The specified location {location_str} could not be found or was in an invalid format. Please check line numbers and format (e.g., L21:T0, L24:C). Ensure the line number exists in the document."
         else:
-            doc_texts = [doc_data.get(key) for key in location_keys if doc_data.get(key) is not None]
+            # Use expanded_location_keys for text retrieval
+            doc_texts = [doc_data.get(key) for key in expanded_location_keys if doc_data.get(key) is not None]
             
+            # Formulate the range that was actually checked for display in results
+            actual_checked_range = ""
+            if len(expanded_location_keys) > 1:
+                actual_checked_range = f" (Checked range: {expanded_location_keys[0].split(':')[0]} - {expanded_location_keys[-1].split(':')[0]})"
+            else:
+                actual_checked_range = f" (Checked line: {expanded_location_keys[0].split(':')[0]})"
+
+
             is_found = False
             for text in doc_texts:
                 if sentence_to_check in text:
@@ -154,19 +198,19 @@ def run_checker(df, doc_data, line_to_key_map):
 
             if is_found:
                 result_item["status"] = "✅ Correct"
-                result_item["details"] = f"The sentence was found exactly as stated in the document within the range {location_str}."
+                result_item["details"] = f"The sentence was found exactly as stated in the document within the specified location {location_str}{actual_checked_range}."
             else:
                 # If not found, combine text for highlighting context
                 full_doc_text = " ".join(doc_texts)
                 result_item["status"] = "❌ Incorrect"
                 # If the combined text is empty (e.g., trying to check an empty line)
                 if not full_doc_text.strip():
-                    result_item["details"] = f"The sentence was **not** found in the specified location {location_str}. The document content at this location appears to be empty."
+                    result_item["details"] = f"The sentence was **not** found in the specified location {location_str}{actual_checked_range}. The document content at this location appears to be empty."
                 else:
                     highlighted_diff = get_highlighted_diff(sentence_to_check, full_doc_text)
-                    result_item["details"] = f"The sentence was **not** found in any single line within the specified range. Differences compared to the combined text from the range are highlighted below:"
+                    result_item["details"] = f"The sentence was **not** found in any single line within the specified location {location_str}{actual_checked_range}. Differences compared to the combined text from the range are highlighted below:"
                     result_item["highlighted"] = highlighted_diff
-                    result_item["doc_text"] = full_doc_text
+                    result_item["doc_text"] = full_doc_text # Provide the combined text that was checked
 
         results.append(result_item)
         
@@ -183,6 +227,8 @@ st.info("""
     1. Upload the meeting minutes as a .docx file (บันทึกการประชุม).
     2. Upload the corresponding Excel file with sentences to check. The Excel file should have a header row.
     3. The tool will verify if each sentence from the Excel file exists at the specified location in the Word document.
+    
+    *Note: For single line locations (e.g., L65:T3), the tool will now automatically check the line before and after as well to account for potential small discrepancies in manual line numbering.*
 """)
 
 col1, col2 = st.columns(2)
@@ -219,10 +265,10 @@ if docx_file is not None and xlsx_file is not None:
                     if res.get("highlighted"):
                         st.markdown("**Highlighted Differences:**")
                         st.markdown(res["highlighted"], unsafe_allow_html=True)
-                        st.markdown("**Original Text from Document:**")
+                        st.markdown("**Original Text from Document (from range checked):**")
                         st.markdown(f"> {res['doc_text']}")
                     elif res.get("doc_text") == "": # Specific case for empty line in document
-                         st.markdown("**Original Text from Document:** (Empty at this location)")
+                         st.markdown("**Original Text from Document (from range checked):** (Content at this location appears to be empty or contains only whitespace.)")
 
 
     except Exception as e:
