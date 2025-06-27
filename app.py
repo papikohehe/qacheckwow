@@ -35,7 +35,7 @@ def parse_docx(file_content: bytes):
     """Read a .docx file and build two maps:
 
     * *doc_data* maps a **full key** like ``L65:T3`` to the cleaned paragraph
-      text (only for **non-empty** paragraphs).
+      text (only for **non‑empty** paragraphs).
     * *line_to_key_map* maps a **line number only** (65) to the key that exists
       *for that exact line* – including empty paragraphs.  This preserves the
       original Word line numbering so that Excel references stay aligned.
@@ -69,7 +69,7 @@ def parse_location_string(
 
     *Single* location – we respect the exact ``T`` value when present, so
     ``L65:T3`` matches **only** that precise paragraph.  If the user gives
-    ``L65:C`` (sometimes they note check-columns) we fall back to the default
+    ``L65:C`` (sometimes they note check‑columns) we fall back to the default
     paragraph for that line (whatever *Word* actually has).
 
     *Range* – we keep the previous behaviour: use only the line numbers so
@@ -139,7 +139,7 @@ def run_checker(df: pd.DataFrame, doc_data: dict, line_to_key_map: dict[int, str
             continue  # skip blank lines
 
         result = {
-            "excel_row": idx + 2,  # +2 (header row + zero-based index)
+            "excel_row": idx + 2,  # +2 (header row + zero‑based index)
             "location": location_raw,
             "sentence": sentence,
             "status": "",
@@ -156,4 +156,80 @@ def run_checker(df: pd.DataFrame, doc_data: dict, line_to_key_map: dict[int, str
             results.append(result)
             continue
 
-        doc_texts = [doc_data[key] for key in loc_keys if ke
+        doc_texts = [doc_data[key] for key in loc_keys if key in doc_data]
+
+        # ------------------------------------------------------------------
+        # Exact match?
+        # ------------------------------------------------------------------
+        if any(sentence in para for para in doc_texts):
+            result["status"] = "✅ Correct"
+            result["details"] = "The sentence was found exactly at the specified location."  # noqa: E501
+        else:
+            combined = " ".join(doc_texts)
+            result["status"] = "❌ Incorrect"
+            result["details"] = (
+                "The sentence was **not** found at the targeted location. "
+                "Differences versus the text in that block are highlighted below:"
+            )
+            result["highlighted"] = get_highlighted_diff(sentence, combined)
+            result["doc_text"] = combined
+
+        results.append(result)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
+st.set_page_config(layout="wide")
+st.title("📄 Extractive Sentence Checker Tool")
+
+st.info(
+    """
+    **How to use this tool:**
+
+    1. Upload the meeting minutes as a `.docx` file (บันทึกการประชุม).
+    2. Upload the corresponding Excel file with sentences to verify.  The Excel
+       file must include a header row.
+    3. The app will check whether each sentence appears **exactly** at the
+       location you specified.
+    """
+)
+
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("1. Upload DOCX File (บันทึกการประชุม)")
+    docx_file = st.file_uploader("Upload your .docx file", type=["docx"], key="docx")
+with col2:
+    st.subheader("2. Upload Excel File")
+    xlsx_file = st.file_uploader("Upload your .xlsx file", type=["xlsx"], key="xlsx")
+
+if docx_file and xlsx_file:
+    st.markdown("---")
+    st.header("Results")
+
+    try:
+        doc_data, line_to_key_map = parse_docx(docx_file.getvalue())
+        df = pd.read_excel(xlsx_file, header=0)
+        results = run_checker(df, doc_data, line_to_key_map)
+
+        if results:
+            for res in results:
+                with st.expander(
+                    f"**Row {res['excel_row']} | Location: {res['location']} | Status: {res['status']}**"
+                ):
+                    st.markdown("**Sentence to Check:**")
+                    st.markdown(f"> {res['sentence']}")
+                    st.markdown("**Details:** " + res["details"])
+
+                    if res.get("highlighted"):
+                        st.markdown("**Highlighted Differences:**")
+                        st.markdown(res["highlighted"], unsafe_allow_html=True)
+                        st.markdown("**Original Text from Document:**")
+                        st.markdown(f"> {res['doc_text']}")
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+        st.error("Please verify that the uploaded files are valid and the Excel file contains a header row.")
