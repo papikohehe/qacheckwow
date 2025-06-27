@@ -5,182 +5,179 @@ import io
 from difflib import SequenceMatcher
 import re
 
+"""
+Streamlit app ‑ *Extractive Sentence Checker*
+============================================
+
+Excel files produced by the client refer to locations in the meeting‑minutes
+Word document using **the labels that already exist inside the DOCX itself** –
+lines are explicitly written like
+
+    L104:T4: วันพุธที่ ๑๒ มิถุนายน …
+
+To avoid any off‑by‑one problems, we therefore **parse those labels directly**
+instead of inventing our own numbering.  This guarantees a 1‑to‑1 match
+between Excel references (e.g. ``L104:T4``) and the internal dictionary keys.
+"""
+
 # ---------------------------------------------------------------------------
-# Helper: highlight differences between two strings
+# Helper: highlight textual differences
 # ---------------------------------------------------------------------------
 
-def get_highlighted_diff(text1: str, text2: str) -> str:
-    """Return *text1* with segments that do **not** occur in *text2* highlighted
-    yellow using inline HTML.  We compare *text1* against *text2* so we can show
-    the missing / altered parts visually to the user.
+def get_highlighted_diff(source: str, target: str) -> str:
+    """Return *source* with segments that are **not** present in *target*
+    wrapped in a yellow span (for Streamlit markdown).
     """
-    matcher = SequenceMatcher(None, text2, text1, autojunk=False)
-    pieces: list[str] = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        fragment = text1[j1:j2]
+    matcher = SequenceMatcher(None, target, source, autojunk=False)
+    out: list[str] = []
+    for tag, _, _, j1, j2 in matcher.get_opcodes():
+        frag = source[j1:j2]
         if tag == "equal":
-            pieces.append(fragment)
-        else:  # "replace", "insert" → highlight what is *only* in text1
-            pieces.append(
-                f"<span style=\"background-color:#fdd835;\">{fragment}</span>"
-            )
-    return "".join(pieces)
+            out.append(frag)
+        else:  # insert / replace – highlight
+            out.append(f"<span style=\"background-color:#fdd835;\">{frag}</span>")
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
-# DOCX parsing
+# DOCX parsing – use the *actual* labels already in the file
 # ---------------------------------------------------------------------------
 
 def parse_docx(file_content: bytes):
-    """Read a .docx file and build two maps:
+    """Return two dictionaries based on the in‑document ``L…:T…:`` labels.
 
-    * *doc_data* maps a **full key** like ``L65:T3`` to the cleaned paragraph
-      text (only for **non‑empty** paragraphs).
-    * *line_to_key_map* maps a **line number only** (65) to the key that exists
-      *for that exact line* – including empty paragraphs.  This preserves the
-      original Word line numbering so that Excel references stay aligned.
+    * **doc_data** maps a key like ``L104:T4`` → *paragraph text without the
+      leading label*.
+    * **line_to_key_map** maps only the *line number* (104) → ``L104:T4`` so
+      that ranges can be resolved quickly.
     """
+    label_re = re.compile(r"^L(?P<line>\d+):T(?P<tab>\d+):\s*(?P<text>.*)")
+
     doc_data: dict[str, str] = {}
     line_to_key_map: dict[int, str] = {}
 
-    doc = Document(io.BytesIO(file_content))
+    document = Document(io.BytesIO(file_content))
+    for para in document.paragraphs:
+        m = label_re.match(para.text)
+        if not m:
+            # Paragraphs that do not start with a label are ignored for matching
+            # They cannot be referenced from Excel anyway.
+            continue
 
-    for line_no, para in enumerate(doc.paragraphs, start=1):
-        tab_count = para.text.count("\t")
-        key = f"L{line_no}:T{tab_count}"
+        line_no = int(m["line"])
+        tab_no = int(m["tab"])
+        key = f"L{line_no}:T{tab_no}"
         line_to_key_map[line_no] = key
-        clean_text = para.text.strip()
-        if clean_text:
-            doc_data[key] = clean_text
+        doc_data[key] = m["text"].strip()
 
     return doc_data, line_to_key_map
 
 
 # ---------------------------------------------------------------------------
-# Location parsing (Excel → real keys)
+# Parse Excel‑style location strings → list of keys
 # ---------------------------------------------------------------------------
 
-def parse_location_string(
-    location_str: str,
-    line_to_key_map: dict[int, str],
-    doc_data: dict[str, str],
-):
-    """Translate a location string from Excel into a list of keys.
+def parse_location_string(location: str, line_to_key_map: dict[int, str], doc_data: dict[str, str]):
+    location = location.strip()
 
-    *Single* location – we respect the exact ``T`` value when present, so
-    ``L65:T3`` matches **only** that precise paragraph.  If the user gives
-    ``L65:C`` (sometimes they note check‑columns) we fall back to the default
-    paragraph for that line (whatever *Word* actually has).
-
-    *Range* – we keep the previous behaviour: use only the line numbers so
-    "L21:T0 - L24:T3" means *lines* 21–24, regardless of their actual tab
-    indentation.
-    """
-    location_str = location_str.strip()
-
-    # ------------------------------------------------------------------
-    # Range handling
-    # ------------------------------------------------------------------
-    if " - " in location_str:
+    # -------- Ranges (e.g. "L104:T4 - L105:T4") --------------------------
+    if " - " in location:
         try:
-            start_loc, end_loc = (p.strip() for p in location_str.split(" - ", 1))
-            line_re = r"L(\d+):(?:T\d+|C)"
-            start_m, end_m = re.match(line_re, start_loc), re.match(line_re, end_loc)
-            if not (start_m and end_m):
+            start, end = (p.strip() for p in location.split(" - ", 1))
+            num_re = r"L(\d+):(?:T\d+|C)"
+            s_m, e_m = re.match(num_re, start), re.match(num_re, end)
+            if not (s_m and e_m):
                 return []
-            start_ln, end_ln = int(start_m.group(1)), int(end_m.group(1))
-            return [
-                line_to_key_map.get(ln)
-                for ln in range(start_ln, end_ln + 1)
-                if line_to_key_map.get(ln)
-            ]
+            s_ln, e_ln = int(s_m.group(1)), int(e_m.group(1))
+            return [line_to_key_map.get(ln) for ln in range(s_ln, e_ln + 1) if line_to_key_map.get(ln)]
         except Exception:
             return []
 
-    # ------------------------------------------------------------------
-    # Single location
-    # ------------------------------------------------------------------
+    # -------- Single location --------------------------------------------
     single_re = r"L(?P<line>\d+):(?:(?:T(?P<tab>\d+))|C)"
-    m = re.match(single_re, location_str)
+    m = re.match(single_re, location)
     if not m:
         return []
 
-    line_num = int(m.group("line"))
-    tab_val = m.group("tab")
+    ln = int(m["line"])
+    tab_val = m["tab"]
 
-    if tab_val is not None:  # Explicit T… given – require exact match
-        key = f"L{line_num}:T{int(tab_val)}"
+    # *Exact* tab requested → require exact key
+    if tab_val is not None:
+        key = f"L{ln}:T{int(tab_val)}"
         return [key] if key in doc_data else []
 
-    # "C" shorthand – use whatever tab count the doc actually has
-    key = line_to_key_map.get(line_num)
+    # "C" shorthand: return whatever key exists for that line number
+    key = line_to_key_map.get(ln)
     return [key] if key else []
 
 
 # ---------------------------------------------------------------------------
-# Main checker
+# Checker core
 # ---------------------------------------------------------------------------
 
-def run_checker(df: pd.DataFrame, doc_data: dict, line_to_key_map: dict[int, str]):
-    """Validate each Excel row and build a list of result dictionaries."""
+def run_checker(df: pd.DataFrame, doc_data: dict[str, str], line_to_key_map: dict[int, str]):
     results: list[dict] = []
 
     if len(df.columns) < 6:
-        st.error("Error: The Excel file must have at least 6 columns.")
+        st.error("The Excel file must contain at least 6 columns (header row included).")
         return None
 
-    sentence_col = df.columns[3]  # 4th column
-    location_col = df.columns[5]  # 6th column
+    sentence_col, location_col = df.columns[3], df.columns[5]
 
     for idx, row in df.iterrows():
         sentence = str(row.get(sentence_col, "")).strip()
-        location_raw = str(row.get(location_col, "")).strip()
-        if not sentence or not location_raw or sentence.lower() == "nan" or location_raw.lower() == "nan":
-            continue  # skip blank lines
+        location = str(row.get(location_col, "")).strip()
+        if not sentence or not location or sentence.lower() == "nan" or location.lower() == "nan":
+            continue  # skip empty rows
 
-        result = {
-            "excel_row": idx + 2,  # +2 (header row + zero‑based index)
-            "location": location_raw,
+        res = {
+            "excel_row": idx + 2,  # DataFrame row 0 == Excel row 2
+            "location": location,
             "sentence": sentence,
             "status": "",
             "details": "",
         }
 
-        loc_keys = parse_location_string(location_raw, line_to_key_map, doc_data)
-        if not loc_keys:
-            result["status"] = "❌ Error"
-            result["details"] = (
-                f"The location `{location_raw}` could not be resolved. "
-                "Check the format (e.g. `L21:T0`, `L24:C`, or `L21:T0 - L24:T3`)."
+        keys = parse_location_string(location, line_to_key_map, doc_data)
+        if not keys:
+            res["status"] = "❌ Error"
+            res["details"] = (
+                f"Location `{location}` could not be resolved – check the format "
+                "or confirm that the corresponding label exists in the DOCX."
             )
-            results.append(result)
+            results.append(res)
             continue
 
-        doc_texts = [doc_data[key] for key in loc_keys if key in doc_data]
+        # Build two parallel lists so we can both test and show nicely later
+        texts = []  # label‑stripped → matching test
+        raw_blocks = []  # label+text → display
+        for k in keys:
+            if k in doc_data:
+                texts.append(doc_data[k])
+                raw_blocks.append(f"{k}: {doc_data[k]}")
 
-        # ------------------------------------------------------------------
-        # Exact match?
-        # ------------------------------------------------------------------
-        if any(sentence in para for para in doc_texts):
-            result["status"] = "✅ Correct"
-            result["details"] = "The sentence was found exactly at the specified location."  # noqa: E501
+        # ---------------- exact match test --------------------------------
+        if any(sentence in t for t in texts):
+            res["status"] = "✅ Correct"
+            res["details"] = "Sentence found exactly at the specified location."
         else:
-            combined = " ".join(doc_texts)
-            result["status"] = "❌ Incorrect"
-            result["details"] = (
-                "The sentence was **not** found at the targeted location. "
-                "Differences versus the text in that block are highlighted below:"
+            combined = " ".join(texts)
+            res["status"] = "❌ Incorrect"
+            res["details"] = (
+                "Sentence **not** found at that location. Differences versus the "
+                "text in that block are highlighted below:"
             )
-            result["highlighted"] = get_highlighted_diff(sentence, combined)
-            result["doc_text"] = combined
+            res["highlighted"] = get_highlighted_diff(sentence, combined)
+            res["doc_text"] = " │ ".join(raw_blocks)
 
-        results.append(result)
+        results.append(res)
 
     return results
 
 
 # ---------------------------------------------------------------------------
-# Streamlit UI
+# Streamlit user interface
 # ---------------------------------------------------------------------------
 
 st.set_page_config(layout="wide")
@@ -190,21 +187,21 @@ st.info(
     """
     **How to use this tool:**
 
-    1. Upload the meeting minutes as a `.docx` file (บันทึกการประชุม).
-    2. Upload the corresponding Excel file with sentences to verify.  The Excel
-       file must include a header row.
-    3. The app will check whether each sentence appears **exactly** at the
-       location you specified.
+    1. Upload the meeting‑minutes Word file (`.docx`) *which already contains* line
+       labels (e.g. `L104:T4:`).
+    2. Upload the corresponding Excel file. Column‑4 should contain the sentence,
+       column‑6 the location string (e.g. `L104:T4` or `L104:T4 - L105:T4`).
+    3. Results for each row will appear below.
     """
 )
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("1. Upload DOCX File (บันทึกการประชุม)")
-    docx_file = st.file_uploader("Upload your .docx file", type=["docx"], key="docx")
+    docx_file = st.file_uploader("Upload .docx", type=["docx"], key="docx")
 with col2:
     st.subheader("2. Upload Excel File")
-    xlsx_file = st.file_uploader("Upload your .xlsx file", type=["xlsx"], key="xlsx")
+    xlsx_file = st.file_uploader("Upload .xlsx", type=["xlsx"], key="xlsx")
 
 if docx_file and xlsx_file:
     st.markdown("---")
@@ -216,20 +213,20 @@ if docx_file and xlsx_file:
         results = run_checker(df, doc_data, line_to_key_map)
 
         if results:
-            for res in results:
+            for r in results:
                 with st.expander(
-                    f"**Row {res['excel_row']} | Location: {res['location']} | Status: {res['status']}**"
+                    f"**Row {r['excel_row']} | Location: {r['location']} | Status: {r['status']}**"
                 ):
                     st.markdown("**Sentence to Check:**")
-                    st.markdown(f"> {res['sentence']}")
-                    st.markdown("**Details:** " + res["details"])
+                    st.markdown(f"> {r['sentence']}")
+                    st.markdown("**Details:** " + r["details"])
 
-                    if res.get("highlighted"):
+                    if r.get("highlighted"):
                         st.markdown("**Highlighted Differences:**")
-                        st.markdown(res["highlighted"], unsafe_allow_html=True)
+                        st.markdown(r["highlighted"], unsafe_allow_html=True)
                         st.markdown("**Original Text from Document:**")
-                        st.markdown(f"> {res['doc_text']}")
+                        st.markdown(f"> {r['doc_text']}")
 
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        st.error("Please verify that the uploaded files are valid and the Excel file contains a header row.")
+        st.error(f"Unexpected error: {e}")
+        st.error("Please ensure both files are valid and follow the expected formats.")
