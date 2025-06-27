@@ -65,7 +65,7 @@ def parse_location_string(location_str, line_to_key_map):
     location_str = location_str.strip()
     
     # Regex to capture the line number from formats like L21:T0, L24:C, etc.
-    range_regex = r"L(\d+):[TC]\d*" # Adjusted to be more general for T or C, and optional tab count
+    range_regex = r"L(\d+):[TC]\d*" 
     
     # Handle ranges
     if " - " in location_str:
@@ -105,7 +105,7 @@ def parse_location_string(location_str, line_to_key_map):
 def run_checker(df, doc_data, line_to_key_map):
     """
     Checks each row of the DataFrame against the parsed document data.
-    Handles single locations by expanding the search to the line before and after.
+    Handles single locations by expanding the search to 5 lines before and 5 lines after.
     For ranges, checks within the specified range.
     Returns a list of dictionaries with the results.
     """
@@ -143,7 +143,7 @@ def run_checker(df, doc_data, line_to_key_map):
         
         expanded_location_keys = []
         if initial_location_keys:
-            # If the original location was a single line, expand to include +/- 1 line
+            # If the original location was a single line, expand to include +/- 5 lines
             if len(initial_location_keys) == 1:
                 original_key = initial_location_keys[0]
                 # Extract the line number from the original_key (e.g., 'L65:T3' -> 65)
@@ -151,26 +151,21 @@ def run_checker(df, doc_data, line_to_key_map):
                 if match:
                     original_line_num = int(match.group(1))
                     
-                    # Add previous line if it exists (line numbers >= 1)
-                    prev_line_num = original_line_num - 1
-                    if prev_line_num >= 1: 
-                        prev_key = line_to_key_map.get(prev_line_num)
-                        if prev_key:
-                            expanded_location_keys.append(prev_key)
+                    # Determine the start and end line numbers for the expanded search
+                    # Ensure line number does not go below 1
+                    search_start_line = max(1, original_line_num - 5)
+                    search_end_line = original_line_num + 5
                     
-                    # Add the original line key
-                    expanded_location_keys.append(original_key)
-
-                    # Add next line if it exists in the document
-                    next_line_num = original_line_num + 1
-                    next_key = line_to_key_map.get(next_line_num)
-                    if next_key:
-                        expanded_location_keys.append(next_key)
+                    # Collect all keys within this expanded range
+                    for line_num in range(search_start_line, search_end_line + 1):
+                        key = line_to_key_map.get(line_num)
+                        if key: # Add key only if it exists in the parsed document data
+                            expanded_location_keys.append(key)
                 else:
                     # Fallback if original_key couldn't be parsed (shouldn't happen with valid input)
                     expanded_location_keys = initial_location_keys
             else:
-                # If it was already a range, just use the provided keys as is
+                # If it was already a range, just use the provided keys as is (no further expansion)
                 expanded_location_keys = initial_location_keys
         
         # --- End of NEW LOGIC ---
@@ -185,8 +180,11 @@ def run_checker(df, doc_data, line_to_key_map):
             # Formulate the range that was actually checked for display in results
             actual_checked_range = ""
             if len(expanded_location_keys) > 1:
-                actual_checked_range = f" (Checked range: {expanded_location_keys[0].split(':')[0]} - {expanded_location_keys[-1].split(':')[0]})"
-            else:
+                # Get the first and last line numbers from the sorted expanded keys
+                first_line_in_range = int(expanded_location_keys[0].split(':')[0][1:]) # Extract number from 'LXX:Tyy'
+                last_line_in_range = int(expanded_location_keys[-1].split(':')[0][1:])
+                actual_checked_range = f" (Checked range: L{first_line_in_range} - L{last_line_in_range})"
+            elif expanded_location_keys: # Should not be empty if we reach here, but defensive
                 actual_checked_range = f" (Checked line: {expanded_location_keys[0].split(':')[0]})"
 
 
@@ -228,7 +226,7 @@ st.info("""
     2. Upload the corresponding Excel file with sentences to check. The Excel file should have a header row.
     3. The tool will verify if each sentence from the Excel file exists at the specified location in the Word document.
     
-    *Note: For single line locations (e.g., L65:T3), the tool will now automatically check the line before and after as well to account for potential small discrepancies in manual line numbering.*
+    *Note: For single line locations (e.g., L65:T3), the tool will now automatically check 5 lines before and 5 lines after to account for potential small discrepancies in manual line numbering.*
 """)
 
 col1, col2 = st.columns(2)
